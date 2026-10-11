@@ -109,7 +109,13 @@ class MultiScaleVoxelModel(tf.keras.Model):
         Input: tensor of float32, shape [N, 3] of N points in 3-D space normalized such that all points are [0,1)
         Output: tensor of int32, shape [N] of N flattened positions
         """
-        return None
+        resolution = 2 ** (depth + 1)
+        scaled = scaled_values * tf.cast(resolution, scaled_values.dtype)
+        ix = tf.cast(tf.floor(scaled[:, 0]), tf.int32)
+        iy = tf.cast(tf.floor(scaled[:, 1]), tf.int32)
+        iz = tf.cast(tf.floor(scaled[:, 2]), tf.int32)
+        r = tf.constant(resolution, dtype=tf.int32)
+        return ix + r * iy + r * r * iz
 
     def call(self, inputs):
         embeddings_list = []
