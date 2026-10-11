@@ -21,9 +21,15 @@ def rays_to_points(rays, n_points, near, far):
       points is [N, n_points, 3] for N rays with n_points each of 3D points
       distances is [n_points] for the distance along the ray for each point
     """
-    # todo fill this in
-
-    return None
+    dtype = rays.dtype
+    near = tf.cast(near, dtype)
+    far = tf.cast(far, dtype)
+    distances = tf.linspace(near, far, n_points)
+    origins = rays[:, :3]
+    directions = rays[:, 3:6]
+    t = tf.reshape(distances, [1, -1, 1])
+    points = tf.expand_dims(origins, axis=1) + t * tf.expand_dims(directions, axis=1)
+    return points, distances
 
 
 def ray_attenuation(attenuations, distances, magnitudes, near, far):
