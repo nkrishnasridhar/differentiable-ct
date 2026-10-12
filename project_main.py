@@ -201,10 +201,11 @@ def main(dataset_path, epochs, n_points, n_rays, save_gt=False, save_projections
     if save_gt:
         skimage.io.imsave(f'data/out/gt.tiff', ground_truth_volume)
     if save_projections:
+        os.makedirs('data/out/projections', exist_ok=True)
         for i, projection in enumerate(dataset.projections):
             p = projection.numpy()
             arr = ((p / np.max(p))*255).astype(np.uint8)
-            skimage.io.imsave(f'data/projections/{i}.tiff', arr)
+            skimage.io.imsave(f'data/out/projections/{i}.tiff', arr)
 
     size = dataset.far - dataset.near
     model = MultiScaleVoxelModel(size, 8, 1)
