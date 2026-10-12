@@ -188,12 +188,14 @@ def get_sample_slices(model, dataset):
     imarr = ((imarr / np.max(imarr)) * 255).astype(np.uint8)
     return imarr
 
-def main(dataset_path, epochs, n_points, n_rays, save_gt=False, save_projections=False):
+def main(dataset_path, epochs, n_points, n_rays, save_gt=False, save_projections=False, seed=0):
     """
     Loads the data, saves a ground truth image, and then creates the model.
     Runs for a given number of epochs and number of sample points/sample rays for each projection image training loop.
     Saves a TIFF image of the sample slice output every 10 epochs.
     """
+    tf.keras.utils.set_random_seed(seed)
+
     dataset = TIGREDataset(dataset_path, device="cuda", n_rays=n_rays)
 
     # need to transpose to get top down view
