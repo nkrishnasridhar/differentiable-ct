@@ -1,4 +1,7 @@
+import csv
 import os
+import subprocess
+import time
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
@@ -165,6 +168,41 @@ def train(model, dataset, optimizer, n_points):
         optimizer.apply_gradients(zip(gradients, model.trainable_variables))
     return total_loss / num_projections
 
+METRICS_CSV_FIELDS = [
+    'epoch', 'loss', 'ssim', 'psnr', 'pred_max_before_norm', 'frac_negative',
+    'epoch_seconds', 'ssim_scope', 'git_commit',
+    'model', 'dataset', 'seed', 'n_points', 'n_rays', 'n_depth', 'embedding_dim', 'learning_rate',
+]
+
+
+def _dataset_name(dataset_path):
+    base = os.path.splitext(os.path.basename(dataset_path))[0]
+    if base.endswith('_50'):
+        return base[:-3]
+    return base
+
+
+def _git_commit_short():
+    try:
+        return subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ''
+
+
+def append_metrics_row(csv_path, row):
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    write_header = not os.path.isfile(csv_path) or os.path.getsize(csv_path) == 0
+    with open(csv_path, 'a', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=METRICS_CSV_FIELDS)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
 def get_sample_slices(model, dataset):
     """
     Queries the network at many 3-dimensional points to produce a voxelized grid of attenuation values.
@@ -183,12 +221,44 @@ def get_sample_slices(model, dataset):
         image_pred = tf.reshape(image_pred, shape)
         slice_list.append(image_pred)
 
-    imarr = np.array(slice_list)
-    imarr = np.maximum(imarr, 0.0)
-    imarr = ((imarr / np.max(imarr)) * 255).astype(np.uint8)
-    return imarr
+    uint8_volume, _, _ = _volume_from_slice_predictions(slice_list)
+    return uint8_volume
 
-def main(dataset_path, epochs, n_points, n_rays, save_gt=False, save_projections=False, seed=0):
+
+def _volume_from_slice_predictions(slice_list):
+    imarr = np.array(slice_list, dtype=np.float32)
+    pred_max = float(np.max(imarr))
+    frac_negative = float(np.mean(imarr < 0.0))
+    clipped = np.maximum(imarr, 0.0)
+    scale = np.max(clipped)
+    if scale > 0:
+        uint8_volume = ((clipped / scale) * 255).astype(np.uint8)
+    else:
+        uint8_volume = np.zeros(clipped.shape, dtype=np.uint8)
+    return uint8_volume, pred_max, frac_negative
+
+
+def evaluate_volume_metrics(model, dataset, ground_truth_volume):
+    slices = dataset.voxels.shape[2]
+    slice_list = []
+    for i in range(slices):
+        voxels = tf.convert_to_tensor(dataset.voxels[:, :, i], dtype=tf.float32)
+        shape = voxels.shape[0:2]
+        voxels = tf.reshape(voxels, (-1, 3))
+        image_pred = model(voxels)
+        slice_list.append(tf.reshape(image_pred, shape).numpy())
+
+    predicted_volume, pred_max, frac_negative = _volume_from_slice_predictions(slice_list)
+    pred_expanded = tf.expand_dims(predicted_volume, axis=-1)
+    gt_expanded = tf.expand_dims(ground_truth_volume, axis=-1)
+    psnr_per_slice = tf.image.psnr(pred_expanded, gt_expanded, max_val=255)
+    ssim_per_slice = tf.image.ssim(pred_expanded, gt_expanded, max_val=255)
+    volumetric_ssim = float(tf.reduce_mean(ssim_per_slice).numpy())
+    volumetric_psnr = float(tf.reduce_mean(psnr_per_slice).numpy())
+    return predicted_volume, volumetric_ssim, volumetric_psnr, pred_max, frac_negative
+
+
+def main(dataset_path, epochs, n_points, n_rays, save_gt=False, save_projections=False, seed=0, log_csv=None):
     """
     Loads the data, saves a ground truth image, and then creates the model.
     Runs for a given number of epochs and number of sample points/sample rays for each projection image training loop.
@@ -209,33 +279,56 @@ def main(dataset_path, epochs, n_points, n_rays, save_gt=False, save_projections
             arr = ((p / np.max(p))*255).astype(np.uint8)
             skimage.io.imsave(f'data/out/projections/{i}.tiff', arr)
 
+    n_depth = 8
+    embedding_dim = 1
+    learning_rate = 0.1
+    model_name = 'nearest'
+    dataset_name = _dataset_name(dataset_path)
+    run_id = f'{model_name}_{dataset_name}_seed{seed}'
+    csv_path = log_csv if log_csv is not None else os.path.join('results', 'csv', f'{run_id}.csv')
+    git_commit = _git_commit_short()
+
     size = dataset.far - dataset.near
-    model = MultiScaleVoxelModel(size, 8, 1)
-    optimizer = tf.keras.optimizers.Adam(learning_rate=0.1)
+    model = MultiScaleVoxelModel(size, n_depth, embedding_dim)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
-    print(f'Starting training...')
-    for epoch in range(1,epochs+1):
+    print(f'Starting training... logging to {csv_path}')
+    for epoch in range(1, epochs + 1):
+        t0 = time.perf_counter()
         epoch_loss = train(model, dataset, optimizer, n_points)
+        epoch_seconds = time.perf_counter() - t0
 
-        print(f'Epoch {epoch} loss: {epoch_loss}')
+        predicted_volume, volumetric_ssim, volumetric_psnr, pred_max, frac_negative = (
+            evaluate_volume_metrics(model, dataset, ground_truth_volume)
+        )
+        loss_val = float(epoch_loss.numpy())
+
+        print(
+            f'Epoch {epoch} loss: {loss_val} SSIM: {volumetric_ssim} PSNR: {volumetric_psnr}'
+        )
+
+        append_metrics_row(csv_path, {
+            'epoch': epoch,
+            'loss': loss_val,
+            'ssim': volumetric_ssim,
+            'psnr': volumetric_psnr,
+            'pred_max_before_norm': pred_max,
+            'frac_negative': frac_negative,
+            'epoch_seconds': epoch_seconds,
+            'ssim_scope': 'full',
+            'git_commit': git_commit,
+            'model': model_name,
+            'dataset': dataset_name,
+            'seed': seed,
+            'n_points': n_points,
+            'n_rays': n_rays,
+            'n_depth': n_depth,
+            'embedding_dim': embedding_dim,
+            'learning_rate': learning_rate,
+        })
 
         if epoch % 10 == 0:
-            predicted_volume = get_sample_slices(model, dataset)
-            pred_expanded = tf.expand_dims(predicted_volume, axis=-1)
-            gt_expanded = tf.expand_dims(ground_truth_volume, axis=-1)
-
-            psnr_per_slice = tf.image.psnr(pred_expanded, gt_expanded, max_val=255)
-            ssim_per_slice = tf.image.ssim(pred_expanded, gt_expanded, max_val=255)
-
-            volumetric_ssim = tf.reduce_mean(ssim_per_slice)
-            volumetric_psnr = tf.reduce_mean(psnr_per_slice)
-
-            print(f'Epoch {epoch} SSIM: {volumetric_ssim}'+ \
-                f' PSNR {volumetric_psnr}')
-
-            if not os.path.exists('data/out/'):
-                os.mkdir('data/out/')
-
+            os.makedirs('data/out', exist_ok=True)
             skimage.io.imsave(f'data/out/{epoch}.tiff', predicted_volume)
 
 if __name__ == '__main__':
