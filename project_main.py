@@ -203,6 +203,39 @@ def append_metrics_row(csv_path, row):
         writer.writerow(row)
 
 
+def _checkpoint_run_dir(checkpoint_dir, run_id):
+    return os.path.join(checkpoint_dir, run_id)
+
+
+def _latest_checkpoint(run_dir):
+    if not os.path.isdir(run_dir):
+        return None, 0
+    best_epoch = 0
+    best_path = None
+    for name in os.listdir(run_dir):
+        if not name.startswith('epoch_') or not name.endswith('.weights.h5'):
+            continue
+        epoch_str = name[len('epoch_'):-len('.weights.h5')]
+        if not epoch_str.isdigit():
+            continue
+        epoch = int(epoch_str)
+        if epoch > best_epoch:
+            best_epoch = epoch
+            best_path = os.path.join(run_dir, name)
+    return best_path, best_epoch
+
+
+def _save_checkpoint(model, run_dir, epoch):
+    os.makedirs(run_dir, exist_ok=True)
+    path = os.path.join(run_dir, f'epoch_{epoch:04d}.weights.h5')
+    model.save_weights(path)
+    return path
+
+
+def _build_model(model):
+    _ = model(tf.zeros((1, 3), dtype=tf.float32))
+
+
 def get_sample_slices(model, dataset):
     """
     Queries the network at many 3-dimensional points to produce a voxelized grid of attenuation values.
@@ -258,7 +291,18 @@ def evaluate_volume_metrics(model, dataset, ground_truth_volume):
     return predicted_volume, volumetric_ssim, volumetric_psnr, pred_max, frac_negative
 
 
-def main(dataset_path, epochs, n_points, n_rays, save_gt=False, save_projections=False, seed=0, log_csv=None):
+def main(
+    dataset_path,
+    epochs,
+    n_points,
+    n_rays,
+    save_gt=False,
+    save_projections=False,
+    seed=0,
+    log_csv=None,
+    checkpoint_dir=None,
+    resume=False,
+):
     """
     Loads the data, saves a ground truth image, and then creates the model.
     Runs for a given number of epochs and number of sample points/sample rays for each projection image training loop.
@@ -291,9 +335,27 @@ def main(dataset_path, epochs, n_points, n_rays, save_gt=False, save_projections
     size = dataset.far - dataset.near
     model = MultiScaleVoxelModel(size, n_depth, embedding_dim)
     optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    _build_model(model)
+
+    start_epoch = 1
+    if resume:
+        if not checkpoint_dir:
+            raise ValueError('resume=True requires checkpoint_dir')
+        run_dir = _checkpoint_run_dir(checkpoint_dir, run_id)
+        checkpoint_path, last_epoch = _latest_checkpoint(run_dir)
+        if checkpoint_path is None:
+            print(f'No checkpoint found in {run_dir}; starting from epoch 1')
+        else:
+            model.load_weights(checkpoint_path)
+            start_epoch = last_epoch + 1
+            print(f'Resumed from {checkpoint_path}; starting at epoch {start_epoch}')
+
+    if start_epoch > epochs:
+        print(f'Already completed epoch {start_epoch - 1}; nothing to train (epochs={epochs})')
+        return
 
     print(f'Starting training... logging to {csv_path}')
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         t0 = time.perf_counter()
         epoch_loss = train(model, dataset, optimizer, n_points)
         epoch_seconds = time.perf_counter() - t0
@@ -330,6 +392,12 @@ def main(dataset_path, epochs, n_points, n_rays, save_gt=False, save_projections
         if epoch % 10 == 0:
             os.makedirs('data/out', exist_ok=True)
             skimage.io.imsave(f'data/out/{epoch}.tiff', predicted_volume)
+
+        if checkpoint_dir:
+            checkpoint_path = _save_checkpoint(
+                model, _checkpoint_run_dir(checkpoint_dir, run_id), epoch
+            )
+            print(f'Saved checkpoint {checkpoint_path}')
 
 if __name__ == '__main__':
     dataset_path = 'data/ct_data/chest_50.pickle'
