@@ -52,6 +52,9 @@ def ray_attenuation(attenuations, distances, magnitudes, near, far):
     :param far: float, the farthest distance to region of interest
     :return: tensor of floats [n_rays] which is the attenuation value for each ray
     """
+    dtype = attenuations.dtype
+    distances = tf.cast(distances, dtype)
+    magnitudes = tf.cast(magnitudes, dtype)
     dt = tf.reshape(distances[1:] - distances[:-1], [1, -1])
     segment = (attenuations[:, :-1] + attenuations[:, 1:]) * 0.5 * dt
     integral = tf.reduce_sum(segment, axis=1)
