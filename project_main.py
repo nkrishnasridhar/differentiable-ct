@@ -133,12 +133,15 @@ class MultiScaleVoxelModel(tf.keras.Model):
     Output from the embedding layers is combined using a simple 2 layer Dense network with silu activation.
     """
 
-    def __init__(self, size, n_depth, embedding_dim = 1):
+    def __init__(self, size, n_depth, embedding_dim=1, lookup_mode='nearest'):
         super(MultiScaleVoxelModel, self).__init__()
 
         self.size = size
         self.n_depth = n_depth
         self.embedding_dim = embedding_dim
+        if lookup_mode not in ('nearest', 'trilinear'):
+            raise ValueError(f'lookup_mode must be nearest or trilinear, got {lookup_mode!r}')
+        self.lookup_mode = lookup_mode
 
         # 1. Multi-scale embedding tables (2x2x2, 4x4x4, 8x8x8...)
         self.embedding_layers = []
@@ -186,8 +189,13 @@ class MultiScaleVoxelModel(tf.keras.Model):
         
         # Collect features from all resolutions separately
         for depth in range(self.n_depth):
-            idx = self.get_flattened_position(scaled_values, depth)
-            features = self.embedding_layers[depth](idx)
+            if self.lookup_mode == 'trilinear':
+                features = trilinear_embedding_lookup(
+                    self.embedding_layers[depth], scaled_values, depth
+                )
+            else:
+                idx = self.get_flattened_position(scaled_values, depth)
+                features = self.embedding_layers[depth](idx)
             embeddings_list.append(features)
 
         # Combine features using the two Dense layers
@@ -359,6 +367,7 @@ def main(
     log_csv=None,
     checkpoint_dir=None,
     resume=False,
+    model='nearest',
 ):
     """
     Loads the data, saves a ground truth image, and then creates the model.
@@ -383,14 +392,16 @@ def main(
     n_depth = 8
     embedding_dim = 1
     learning_rate = 0.1
-    model_name = 'nearest'
+    if model not in ('nearest', 'trilinear'):
+        raise ValueError(f'model must be nearest or trilinear, got {model!r}')
+    model_name = model
     dataset_name = _dataset_name(dataset_path)
     run_id = f'{model_name}_{dataset_name}_seed{seed}'
     csv_path = log_csv if log_csv is not None else os.path.join('results', 'csv', f'{run_id}.csv')
     git_commit = _git_commit_short()
 
     size = dataset.far - dataset.near
-    model = MultiScaleVoxelModel(size, n_depth, embedding_dim)
+    model = MultiScaleVoxelModel(size, n_depth, embedding_dim, lookup_mode=model_name)
     optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
     _build_model(model)
 
