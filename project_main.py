@@ -60,6 +60,60 @@ def ray_attenuation(attenuations, distances, magnitudes, near, far):
     integral = tf.reduce_sum(segment, axis=1)
     return integral * magnitudes
 
+
+def trilinear_corner_indices_and_weights(scaled_values, depth):
+    """
+    Eight-corner trilinear weights for points in [0, 1).
+
+    scaled_values: [N, 3] float32
+    Returns corner_indices [N, 8] int32, corner_weights [N, 8] (same dtype as scaled_values)
+    """
+    resolution = 2 ** (depth + 1)
+    r = tf.constant(resolution, dtype=tf.int32)
+    dtype = scaled_values.dtype
+    u = scaled_values * tf.cast(resolution, dtype)
+
+    i0 = tf.cast(tf.floor(u[:, 0]), tf.int32)
+    j0 = tf.cast(tf.floor(u[:, 1]), tf.int32)
+    k0 = tf.cast(tf.floor(u[:, 2]), tf.int32)
+    r1 = r - 1
+    i1 = tf.minimum(i0 + 1, r1)
+    j1 = tf.minimum(j0 + 1, r1)
+    k1 = tf.minimum(k0 + 1, r1)
+
+    fx = u[:, 0] - tf.cast(i0, dtype)
+    fy = u[:, 1] - tf.cast(j0, dtype)
+    fz = u[:, 2] - tf.cast(k0, dtype)
+
+    def _flat(ix, iy, iz):
+        return ix + r * iy + r * r * iz
+
+    corner_indices = tf.stack([
+        _flat(i0, j0, k0), _flat(i1, j0, k0), _flat(i0, j1, k0), _flat(i1, j1, k0),
+        _flat(i0, j0, k1), _flat(i1, j0, k1), _flat(i0, j1, k1), _flat(i1, j1, k1),
+    ], axis=1)
+
+    corner_weights = tf.stack([
+        (1 - fx) * (1 - fy) * (1 - fz),
+        fx * (1 - fy) * (1 - fz),
+        (1 - fx) * fy * (1 - fz),
+        fx * fy * (1 - fz),
+        (1 - fx) * (1 - fy) * fz,
+        fx * (1 - fy) * fz,
+        (1 - fx) * fy * fz,
+        fx * fy * fz,
+    ], axis=1)
+
+    return corner_indices, corner_weights
+
+
+def trilinear_embedding_lookup(embedding_layer, scaled_values, depth):
+    """Weighted sum of eight embedding lookups; shape [N, embedding_dim]."""
+    corner_indices, corner_weights = trilinear_corner_indices_and_weights(scaled_values, depth)
+    corner_features = embedding_layer(corner_indices)
+    return tf.reduce_sum(corner_features * tf.expand_dims(corner_weights, -1), axis=1)
+
+
 class MultiScaleVoxelModel(tf.keras.Model):
     """
     MultiScaleVoxelModel uses keras EmbeddingLayer instances for the core 3D Model.
