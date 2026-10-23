@@ -9,7 +9,7 @@
 
 \title{Differentiable Cone-Beam CT Reconstruction\\
 with Multi-Scale Voxel Embeddings}
-\author{[Name]\\ COSC440}
+\author{Navaneethakrishna Sridhar\\ COSC440}
 \date{}
 
 \begin{document}
@@ -17,68 +17,93 @@ with Multi-Scale Voxel Embeddings}
 
 \begin{abstract}
 \noindent
-[Placeholder: one paragraph. Differentiable rendering of a chest CBCT volume from 50 cone-beam projections. Model~1 uses nearest multi-scale embedding lookup. Model~2 replaces that lookup with trilinear interpolation of the same tables. State whether volumetric SSIM improved, stayed the same, or worsened by epoch~50. Absolute metric values are not the claim.]
+I reconstructed a chest CT volume from 50 cone-beam projections by training a small network to predict X-ray attenuation along each ray.
+The baseline reads a nearest cell from a stack of embedding grids.
+I then changed only that read to a trilinear blend of the eight surrounding cells, and trained both models for 50 epochs with the same seed and the same hyperparameters.
+Trilinear SSIM at epoch 50 was 0.715, compared with 0.680 for nearest.
+PSNR did not follow the same pattern.
 \end{abstract}
 
 \section{Introduction}
-Differentiable rendering optimises a 3D scene so that rendered views match observed images~\cite{atlasprojectslides2026}.
-This project reconstructs a monochromatic cone-beam CT (CBCT) volume from sparse projections using a simplified neural attenuation field~\cite{cosc440brief2026,zha2022naf}.
-Geometry and projections come from the TIGRE toolbox~\cite{tigre}.
+Differentiable rendering updates a 3D model so that the images it produces match a set of observed views~\cite{atlasprojectslides2026}.
+In this project the views are cone-beam CT (CBCT) projections, and the model is a simplified neural attenuation field~\cite{cosc440brief2026,zha2022naf}.
+The scan geometry and the projection images come from TIGRE~\cite{tigre}.
 
-The baseline (Model~1) encodes query points on a power-of-two octree~\cite{atlasprojectslides2026}, looks up a nearest cell in a \texttt{keras.layers.Embedding} table at each resolution, and maps the concatenated features through a small dense network to a scalar attenuation.
-Line integrals follow a discrete Beer--Lambert model.
-The supplied projections are already log-transformed, so the network is trained against the line integral rather than an exponential intensity~\cite{cosc440brief2026,atlasprojectslides2026}.
-Model~2 changes only the embedding lookup.
+The baseline encodes each sample point on a power-of-two octree~\cite{atlasprojectslides2026}, looks up one embedding vector per resolution, and passes the concatenated vectors through two dense layers to get a scalar attenuation.
+Those values are integrated along the ray with the trapezoidal rule.
+The projections in the dataset are already log-transformed, so the training target is the line integral from the Beer--Lambert law, without an extra exponential~\cite{cosc440brief2026,atlasprojectslides2026}.
+The second model keeps that pipeline and changes the embedding lookup.
 
 \section{Experimental Design and Methods}
 \subsection{Model 1 (nearest lookup)}
-[Placeholder: architecture.]
-Points are scaled into \([0,1)\) and indexed on grids of resolution \(2, 4, \ldots, 256\) (\(n_{\mathrm{depth}}=8\)).
-Each table stores \texttt{embedding\_dim}\( = 1\).
-Features are concatenated and passed through \texttt{Dense(64, silu)} then \texttt{Dense(1)}.
-Attenuation \(\mu\) is unconstrained.
-Exported slices are clipped at zero and scaled by the volume maximum to \texttt{uint8}.
+Each query point is scaled into \([0, 1)\) and binned on grids of resolution \(2, 4, \ldots, 256\) (\(n_{\mathrm{depth}} = 8\)).
+The flattened index uses \(x\) as the fastest axis, which is the order the unit test expects.
+Each embedding table stores one value per cell.
+The eight vectors are concatenated and passed through \texttt{Dense(64, silu)} and then \texttt{Dense(1)}.
+The network can output a negative attenuation.
+When I save a volume I clip negatives to zero and scale by the maximum, then store \texttt{uint8}.
 
-Sampling uses \(n_{\mathrm{points}}=192\) uniform stations from \texttt{near} to \texttt{far}.
-The line integral is the composite trapezoidal rule on those stations, multiplied by the ray-direction magnitude~\cite{cosc440brief2026}.
-The loss is mean squared error between the predicted integrals and the projection pixels, divided by the mean squared pixel value.
-Optimisation uses Adam~\cite{atlaslec5badam} with learning rate \(0.1\), for 50 epochs, \(n_{\mathrm{rays}}=2048\) random pixels per projection, seed \(0\).
+Along each ray I take \(n_{\mathrm{points}} = 192\) samples, evenly spaced from \texttt{near} to \texttt{far}, including both ends.
+The integral is the composite trapezoidal rule on those samples, multiplied by the magnitude of the ray direction~\cite{cosc440brief2026}.
+The loss is mean squared error between that integral and the projection pixel, divided by the mean squared pixel value in the sampled rays.
+I trained with Adam~\cite{atlaslec5badam} at learning rate \(0.1\), for 50 epochs, with \(n_{\mathrm{rays}} = 2048\) random pixels per projection and seed \(0\).
 
 \subsection{Model 2 (trilinear lookup)}
-[Placeholder: what changed.]
-The embedding tables, dense layers, sampling, loss, optimiser, and hyperparameters are unchanged.
-At each resolution the eight corners of the cell containing the query are gathered with the same flattened index order as Model~1, and combined with trilinear weights.
-The upper corner index is clamped to the last bin.
-Parameter count is identical; lookups per query point rise from 8 to 64.
-[Placeholder: parameter count from \texttt{scripts/count\_params.py}: both models have XX trainable parameters.]
+I did not change the tables, the dense layers, the ray sampling, the loss, or the optimiser.
+At each resolution the lookup now gathers the eight corners of the cell that contains the point, using the same index order as the baseline, and mixes them with trilinear weights.
+If a corner would fall outside the grid, that index is clamped to the last bin.
+On an integer coordinate the fractional part is zero, so one weight is 1 and the result matches nearest lookup.
+At a half-cell point each of the eight weights is \(0.125\).
+
+\texttt{scripts/count\_params.py} reports 19{,}174{,}601 trainable parameters for both models.
+A query point does 8 embedding lookups in the baseline and 64 in the trilinear model.
+The dense layers still do 576 multiply-adds per point either way.
+The extra cost is reading the fine \(256^3\) table eight times.
 
 \subsection{Data, metrics, and protocol}
-The chest dataset is a \(128^3\) volume with 50 projections of \(256\times 256\)~\cite{tigre}.
-Metrics are the normalised MSE training loss, volumetric SSIM, and PSNR.
-SSIM is used because per-pixel MSE can look acceptable while larger-scale structure is poor~\cite{atlaslec8ssim}; the training loss is not switched to SSIM.
-SSIM and PSNR are computed every epoch on the full volume after per-volume max normalisation to \texttt{uint8}.
-Both models use the same seed and hyperparameters.
-Hardware and the TensorFlow version are taken from the Colab log: [Placeholder: GPU name, TensorFlow version].
+I used the chest pickle: a \(128^3\) volume and 50 projections of \(256 \times 256\).
+Each epoch I logged the normalised MSE, plus SSIM and PSNR on the full volume after the \texttt{uint8} scaling described above.
+I kept MSE as the training loss.
+SSIM is there because a per-pixel error can look small while the larger structure of the slice is still wrong~\cite{atlaslec8ssim}.
+Both runs used seed \(0\), \(n_{\mathrm{points}} = 192\), \(n_{\mathrm{rays}} = 2048\), \(n_{\mathrm{depth}} = 8\), \texttt{embedding\_dim} \(= 1\), and Adam at \(0.1\).
+Training was on a Colab Tesla T4 with TensorFlow 2.21.0.
 
 \subsection{Hypothesis}
-On chest, seed \(0\), with the shared protocol above, trilinear volumetric SSIM at epoch~50 is higher than nearest, or trilinear reaches the nearest model's epoch-50 SSIM in fewer epochs.
-A difference is expected after the coarse shape exists (after about epoch~10), where nearest assignment on the fine grids is piecewise constant.
-The hypothesis is not supported if the epoch-50 SSIM values differ by less than \(0.01\) and the loss curves overlap, or if trilinear SSIM is lower by at least that amount.
+On this chest run, trilinear volumetric SSIM at epoch 50 would be higher than nearest, or trilinear would reach the nearest epoch-50 SSIM in fewer epochs.
+I expected the gap after the coarse shape was already in place, because the coarse grids are similar under both lookups and the fine grids are where nearest assignment is constant inside each cell.
+I would treat the hypothesis as unsupported if the epoch-50 SSIM values differed by less than \(0.01\) and the loss curves sat on top of each other, or if trilinear SSIM were lower by at least \(0.01\).
 
 \section{Results}
-Figure~\ref{fig:baseline} shows baseline loss and SSIM.
-[Placeholder: loss falls from XX at epoch~1 to XX at epoch~50; SSIM rises from XX to XX.]
+The baseline does learn the volume.
+In Figure~\ref{fig:baseline} the normalised MSE drops from 7.20 at epoch 1 to \(3.77 \times 10^{-4}\) at epoch 50, and SSIM rises from 0.149 to 0.680.
+Most of that SSIM gain is early: it is already 0.512 by epoch 10, which matches the coarse body shape the project brief shows around that epoch.
+After that the curve flattens.
+The brief also says this style of positional grid struggles with fine detail, and the late part of Figure~\ref{fig:baseline} looks like that.
 
 \begin{figure}[ht]
   \centering
   \includegraphics[width=\textwidth]{figures/fig1_baseline.pdf}
-  \caption{Baseline (nearest lookup) on chest, seed~0, \(n_{\mathrm{points}}=192\), \(n_{\mathrm{rays}}=2048\).
+  \caption{Baseline (nearest lookup) on chest, seed 0, \(n_{\mathrm{points}}=192\), \(n_{\mathrm{rays}}=2048\).
   Left: normalised MSE. Right: volumetric SSIM on max-normalised \texttt{uint8} volumes.}
   \label{fig:baseline}
 \end{figure}
 
-Figure~\ref{fig:comparison} compares nearest and trilinear lookup.
-[Placeholder: state the sign of the epoch-50 SSIM gap (positive, negative, or neutral) and the epoch at which trilinear SSIM first matches the nearest epoch-50 SSIM, or that it does not.]
+Figure~\ref{fig:comparison} is the comparison.
+Trilinear starts worse.
+At epoch 1 its loss is 31.6 and its SSIM is 0.039, against 7.20 and 0.149 for nearest.
+At epoch 10 nearest SSIM is still ahead (0.512 against 0.397).
+From there trilinear keeps climbing while nearest levels off.
+At epoch 50, trilinear SSIM is 0.715 and nearest SSIM is 0.680, a gap of 0.034.
+Trilinear first passes the nearest epoch-50 SSIM at epoch 43, where its SSIM is 0.682.
+That is the ``fewer epochs to the same SSIM'' part of the hypothesis, even though trilinear was behind for the first half of training.
+
+The other metrics do not move the same way.
+Epoch-50 loss is \(3.77 \times 10^{-4}\) for nearest and \(3.94 \times 10^{-4}\) for trilinear, so the projection error is about the same, with nearest slightly lower.
+Epoch-50 PSNR is 23.9 for nearest and 23.0 for trilinear.
+SSIM is the metric the hypothesis was about, and on that metric the change helped.
+There is also a bump in the trilinear curve at epoch 34, where the loss jumps to 0.0238 and SSIM falls to 0.581, then recovers.
+With Adam at learning rate 0.1 and a fresh shuffle of rays every epoch, a spike like that is possible.
+I would not treat one epoch as the result.
 
 \begin{figure}[ht]
   \centering
@@ -88,6 +113,13 @@ Figure~\ref{fig:comparison} compares nearest and trilinear lookup.
   \label{fig:comparison}
 \end{figure}
 
+Table~\ref{tab:cost} is why I think the SSIM gap is about the lookup and not about a bigger model.
+The parameter counts match.
+Trilinear just does more reads.
+On the T4, a nearest epoch took about 2.1 seconds on average and a trilinear epoch about 10.6 seconds, taken from the \texttt{epoch\_seconds} column.
+Wall-clock time on its own is a weak thing to optimise for here~\cite{cosc440brief2026}.
+The useful timing result is the epoch count: trilinear reached the baseline's final SSIM seven epochs earlier, and then finished higher.
+
 \begin{table}[ht]
   \centering
   \caption{Parameter count and lookup cost. Dense multiply-adds per query point are the same for both models.}
@@ -96,20 +128,26 @@ Figure~\ref{fig:comparison} compares nearest and trilinear lookup.
     \toprule
     & Nearest & Trilinear \\
     \midrule
-    Trainable parameters & XX & XX \\
+    Trainable parameters & 19{,}174{,}601 & 19{,}174{,}601 \\
     Embedding lookups per point & 8 & 64 \\
     Dense multiply-adds per point & 576 & 576 \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-[Placeholder: one sentence on wall-clock time per epoch, as a secondary note only.]
-
 \section{Conclusions}
-[Placeholder: whether the hypothesis was supported, tied to piecewise-constant versus interpolated embeddings.]
-Limitations: a single seed, the chest dataset only, SSIM after per-volume maximum normalisation, a 50-epoch budget, and possible GPU non-determinism.
-[Placeholder: one implication for similar lookup-based reconstructions, and one future direction such as a hash encoder~\cite{zha2022naf}, a second anatomy, or more than one seed.
-Gaussian embeddings~\cite{3dgrct2024} are a separate representation and were not tested.]
+The hypothesis is supported on SSIM.
+Trilinear lookup finished 0.034 higher than nearest, which is above the 0.01 gap I set in advance, and it reached the nearest epoch-50 SSIM at epoch 43.
+I think that fits the piecewise-constant grids: once the coarse shape exists, blending the cell corners gives the dense layer a smoother field on the fine grids, and SSIM is sensitive to that structure~\cite{atlaslec8ssim}.
+The same run does not support a claim about PSNR or about the training loss.
+Both of those ended slightly better for nearest.
+
+This is one seed on one dataset, stopped at 50 epochs.
+SSIM and PSNR are computed after each volume is divided by its own maximum and quantised to \texttt{uint8}, so a global scale difference can be hidden and a real contrast change can be washed out.
+GPU reductions can also move the loss a little between machines even with the seed fixed.
+For someone using the same embedding tables, the practical point is that the lookup can change SSIM when the parameter count does not.
+I would next try the hash encoder from NAF~\cite{zha2022naf}, repeat the chest comparison with another seed, or run the same pair of models on a second anatomy.
+A 3D Gaussian representation~\cite{3dgrct2024} would be a different model, not a small change to this one.
 
 \bibliographystyle{plainnat}
 \bibliography{refs}
