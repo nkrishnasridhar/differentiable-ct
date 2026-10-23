@@ -16,9 +16,9 @@ def check_trilinear_matches_nearest_at_integer_coords():
 
     test_points = tf.constant(
         [
+            [0.0, 0.0, 0.0],
             [0.5, 0.5, 0.5],
-            [0.25, 0.25, 0.125],
-            [0.5, 0.25, 0.125],
+            [0.5, 0.0, 0.5],
         ],
         dtype=tf.float32,
     )
